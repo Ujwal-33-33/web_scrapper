@@ -23,4 +23,10 @@ frontend/.env
 
 # Jupyter Notebook Checkpoints
 .ipynb_checkpoints/
-test.ipynb 
+test.ipynb
+
+# Excluded project files
+cron.yml
+delete.py
+server.js
+requirements.txt
