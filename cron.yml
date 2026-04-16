@@ -1,0 +1,17 @@
+name: Daily YC Scraper Cron
+
+on:
+  schedule:
+    # Runs at 00:00 UTC every day
+    - cron: '0 0 * * *'
+  workflow_dispatch: # Allows you to trigger it manually from the GitHub UI for testing
+
+jobs:
+  trigger-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hit Pipeline Endpoint
+        run: |
+          # Replace this URL with your actual deployed backend URL once it's live
+          curl -X POST https://your-backend-app.onrender.com/api/pipeline/start \
+          -H "Content-Type: application/json"

@@ -1,0 +1,25 @@
+# Python Environments & Cache
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment Variables (NEVER commit these)
+.env
+.env1
+
+# Databases
+leads.db
+
+# Raw Data & Temp Files
+yc_raw.json
+yc_raw_data.json
+temp.pdf
+
+# Frontend Node Modules & Build (Assuming React/Vite is in there)
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+
+# Jupyter Notebook Checkpoints
+.ipynb_checkpoints/
