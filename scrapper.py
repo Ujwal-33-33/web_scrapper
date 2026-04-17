@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+MONGO_URI = os.getenv("MONGO_URI")
 
 app = FastAPI()
 
@@ -22,17 +22,21 @@ app.add_middleware(
 )
 
 async def scrape_yc():
+    print("[SCRAPER] Starting Playwright...")
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
         try:
+            print("[SCRAPER] Navigating to YC page...")
             await page.goto("https://www.ycombinator.com/companies?isHiring=true", timeout=60000)
             await asyncio.sleep(3) 
 
-            for _ in range(15):
+            for i in range(40):
+                print(f"[SCRAPER] Scrolling down... {i+1}/40")
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 await asyncio.sleep(2)
 
+            print("[SCRAPER] Extracting data...")
             data = await page.evaluate('''() => {
                 const links = Array.from(document.querySelectorAll('a'));
                 const results = [];
@@ -53,11 +57,15 @@ async def scrape_yc():
                 }
                 return results;
             }''')
-        except Exception:
+            print(f"[SCRAPER] Successfully extracted {len(data)} raw leads.")
+        except Exception as e:
+            print(f"[SCRAPER ERROR] Playwright crashed: {e}")
             data = []
         finally:
             await browser.close()
+            print("[SCRAPER] Browser closed.")
 
+    print("[SCRAPER] Saving to yc_raw.json")
     with open('yc_raw.json', 'w') as f:
         json.dump(data, f, indent=4)
 
@@ -83,12 +91,17 @@ def categorize_company(description):
             json=payload,
             timeout=10
         )
-        return response.json()["choices"][0]["message"]["content"].strip()
-    except Exception:
+        category = response.json()["choices"][0]["message"]["content"].strip()
+        print(f"[GROQ] Categorized: {category}")
+        return category
+    except Exception as e:
+        print(f"[GROQ ERROR] Failed on '{description}': {e}")
         return "Uncategorized"
 
 def process_data():
+    print("[PROCESS] Starting data cleaning and categorization...")
     if not os.path.exists('yc_raw.json'):
+        print("[PROCESS ERROR] yc_raw.json not found!")
         return
 
     with open('yc_raw.json', 'r') as f:
@@ -107,43 +120,67 @@ def process_data():
             })
 
     if cleaned:
-        client = MongoClient(MONGO_URI)
-        db = client["b2b_database"]
-        collection = db["yc_leads"]
-        collection.delete_many({}) 
-        collection.insert_many(cleaned)
+        try:
+            print(f"[DB] Connecting to MongoDB to insert {len(cleaned)} records...")
+            client = MongoClient(MONGO_URI)
+            db = client["b2b_database"]
+            collection = db["yc_leads"]
+            
+            print("[DB] Deleting old records...")
+            collection.delete_many({}) 
+            
+            print("[DB] Inserting new records...")
+            collection.insert_many(cleaned)
+            print("[DB] Insertion complete.")
+        except Exception as e:
+            print(f"[DB ERROR] MongoDB connection or insertion failed: {e}")
+    else:
+        print("[PROCESS] No valid data found to insert.")
 
 async def run_pipeline():
+    print("\n=== PIPELINE TRIGGERED ===")
     await scrape_yc()
     await asyncio.to_thread(process_data)
+    print("=== PIPELINE FINISHED ===\n")
 
 @app.post("/api/pipeline/start")
 async def start_pipeline(background_tasks: BackgroundTasks):
+    print("[API] Pipeline start requested by frontend.")
     background_tasks.add_task(run_pipeline)
     return {"status": "success", "message": "YC Pipeline started in background."}
 
 @app.get("/api/leads")
 def get_leads(skip: int = 0, limit: int = 20):
-    client = MongoClient(MONGO_URI)
-    db = client["b2b_database"]
-    collection = db["yc_leads"]
-    
-    leads = list(collection.find({}, {"_id": 0}).skip(skip).limit(limit))
-    total = collection.count_documents({})
-    
-    return {"metadata": {"total": total, "skip": skip, "limit": limit}, "data": leads}
+    try:
+        client = MongoClient(MONGO_URI)
+        db = client["b2b_database"]
+        collection = db["yc_leads"]
+        
+        leads = list(collection.find({}, {"_id": 0}).skip(skip).limit(limit))
+        total = collection.count_documents({})
+        return {"metadata": {"total": total, "skip": skip, "limit": limit}, "data": leads}
+    except Exception as e:
+        print(f"[API ERROR] Failed to fetch leads: {e}")
+        return {"metadata": {"total": 0, "skip": skip, "limit": limit}, "data": []}
 
 @app.get("/api/analyze")
 def analyze_data():
-    client = MongoClient(MONGO_URI)
-    db = client["b2b_database"]
-    collection = db["yc_leads"]
-    
-    leads = list(collection.find({}, {"_id": 0, "company_name": 1, "industry": 1}).limit(100))
+    print("[API] Analysis requested.")
+    try:
+        client = MongoClient(MONGO_URI)
+        db = client["b2b_database"]
+        collection = db["yc_leads"]
+        
+        leads = list(collection.find({}, {"_id": 0, "company_name": 1, "industry": 1}).limit(100))
+    except Exception as e:
+        print(f"[API ERROR] MongoDB fetch failed for analysis: {e}")
+        return {"analysis": "Database error."}
+
     if not leads:
         return {"analysis": "No data found. Run the pipeline first."}
 
     if not GROQ_API_KEY:
+        print("[API ERROR] GROQ_API_KEY is missing.")
         return {"analysis": "Error: GROQ_API_KEY environment variable is missing."}
 
     prompt = f"You are a data analyst. Review this list of recent Y Combinator startups and their industries. Provide a concise, three paragraph summary of the current market trends and dominating sectors. Data: {leads}"
@@ -158,6 +195,7 @@ def analyze_data():
     }
     
     try:
+        print("[GROQ] Generating market analysis...")
         response = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers=headers,
@@ -165,7 +203,9 @@ def analyze_data():
             timeout=30
         )
         analysis = response.json()["choices"][0]["message"]["content"]
+        print("[GROQ] Analysis generated successfully.")
     except Exception as e:
+        print(f"[GROQ ERROR] Analysis failed: {e}")
         analysis = f"LLM Error: {e}"
         
     return {"analysis": analysis}
