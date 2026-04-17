@@ -4,35 +4,15 @@ from playwright.async_api import async_playwright
 import json
 import os
 import requests
-import sqlite3
+from pymongo import MongoClient
 from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-DB_FILE = "leads.db"
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS yc_leads (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            company_name TEXT NOT NULL,
-            yc_url TEXT,
-            industry TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    init_db()
-    yield
-
-app = FastAPI(lifespan=lifespan)
+app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
@@ -49,7 +29,7 @@ async def scrape_yc():
             await page.goto("https://www.ycombinator.com/companies?isHiring=true", timeout=60000)
             await asyncio.sleep(3) 
 
-            for _ in range(40):
+            for _ in range(15):
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 await asyncio.sleep(2)
 
@@ -120,15 +100,18 @@ def process_data():
         url = item.get("yc_url", "").strip()
         
         if name and url and len(name) <= 50:
-            cleaned.append((name, url, categorize_company(name)))
+            cleaned.append({
+                "company_name": name,
+                "yc_url": url,
+                "industry": categorize_company(name)
+            })
 
     if cleaned:
-        conn = sqlite3.connect(DB_FILE)
-        cur = conn.cursor()
-        cur.execute("DELETE FROM yc_leads")
-        cur.executemany("INSERT INTO yc_leads (company_name, yc_url, industry) VALUES (?, ?, ?)", cleaned)
-        conn.commit()
-        conn.close()
+        client = MongoClient(MONGO_URI)
+        db = client["b2b_database"]
+        collection = db["yc_leads"]
+        collection.delete_many({}) 
+        collection.insert_many(cleaned)
 
 async def run_pipeline():
     await scrape_yc()
@@ -141,25 +124,22 @@ async def start_pipeline(background_tasks: BackgroundTasks):
 
 @app.get("/api/leads")
 def get_leads(skip: int = 0, limit: int = 20):
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
+    client = MongoClient(MONGO_URI)
+    db = client["b2b_database"]
+    collection = db["yc_leads"]
     
-    total = cur.execute("SELECT count(*) FROM yc_leads").fetchone()[0]
-    rows = cur.execute("SELECT company_name, yc_url, industry FROM yc_leads LIMIT ? OFFSET ?", (limit, skip)).fetchall()
+    leads = list(collection.find({}, {"_id": 0}).skip(skip).limit(limit))
+    total = collection.count_documents({})
     
-    leads = [dict(row) for row in rows]
-    conn.close()
     return {"metadata": {"total": total, "skip": skip, "limit": limit}, "data": leads}
 
 @app.get("/api/analyze")
 def analyze_data():
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    rows = conn.cursor().execute("SELECT company_name, industry FROM yc_leads LIMIT 100").fetchall()
-    conn.close()
+    client = MongoClient(MONGO_URI)
+    db = client["b2b_database"]
+    collection = db["yc_leads"]
     
-    leads = [dict(row) for row in rows]
+    leads = list(collection.find({}, {"_id": 0, "company_name": 1, "industry": 1}).limit(100))
     if not leads:
         return {"analysis": "No data found. Run the pipeline first."}
 
