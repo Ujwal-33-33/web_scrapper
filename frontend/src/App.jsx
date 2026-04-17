@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import './index.css';
 import { Play, Sparkles, ExternalLink, ChevronLeft, ChevronRight, Loader2, Database, Info, Users, Activity, Target } from 'lucide-react';
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = import.meta.env.VITE_API_URL;
 
 export default function App() {
   const [leads, setLeads] = useState([]);
